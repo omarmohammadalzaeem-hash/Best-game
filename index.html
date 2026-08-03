@@ -76,8 +76,90 @@ class AudioEngine {
   portalEnter() { [180,260,340,520,700].forEach((f,i) => this.playTone(f, 'sawtooth', 0.35, 0.11, undefined, i*0.05)); }
   riskPulse()   { this.playTone(60 + Math.random()*30, 'sawtooth', 0.5, 0.045); }
   riskEnd()     { [700,500,300].forEach((f,i) => this.playTone(f, 'sine', 0.3, 0.08, undefined, i*0.08)); }
+
+  // ── Progression System sounds ─────────────────────────────────────────────
+  coinCollect() { [988,1319].forEach((f,i) => this.playTone(f, 'sine', 0.12, 0.09, undefined, i*0.05)); }
+  xpTick()      { this.playTone(700, 'triangle', 0.05, 0.04, 900); }
+  levelUp()     { [523.25,659.25,783.99,1046.50,1318.51,1567.98].forEach((f,i) => this.playTone(f, 'square', 0.22, 0.11, undefined, i*0.09)); }
 }
 const audio = new AudioEngine();
+
+// ─── Player Profile (persistent progression) ─────────────────────────────────
+const PROFILE_KEY = 'neonRunnerProfile';
+
+class PlayerProfile {
+  constructor() {
+    this.coins             = 0;
+    this.totalCoinsEarned  = 0;
+    this.gamesPlayed       = 0;
+    this.totalDistance     = 0;   // in world units
+    this.totalPlayTime     = 0;   // in seconds
+    this.highestScore      = 0;
+    this.xp                = 0;   // XP progress within current level
+    this.level              = 1;
+    this.load();
+  }
+
+  // XP required to advance FROM this level to the next - grows each level
+  xpForLevel(level) {
+    return Math.floor(100 * Math.pow(level, 1.55));
+  }
+
+  load() {
+    try {
+      const raw = localStorage.getItem(PROFILE_KEY);
+      if (raw) {
+        const data = JSON.parse(raw);
+        if (data && typeof data === 'object') {
+          this.coins            = data.coins            ?? 0;
+          this.totalCoinsEarned = data.totalCoinsEarned  ?? 0;
+          this.gamesPlayed      = data.gamesPlayed       ?? 0;
+          this.totalDistance    = data.totalDistance     ?? 0;
+          this.totalPlayTime    = data.totalPlayTime     ?? 0;
+          this.highestScore     = data.highestScore      ?? 0;
+          this.xp               = data.xp                ?? 0;
+          this.level             = data.level             ?? 1;
+        }
+      }
+    } catch (e) {
+      // Corrupt or inaccessible storage - fall back to fresh defaults
+    }
+  }
+
+  save() {
+    try {
+      localStorage.setItem(PROFILE_KEY, JSON.stringify({
+        coins:            this.coins,
+        totalCoinsEarned: this.totalCoinsEarned,
+        gamesPlayed:      this.gamesPlayed,
+        totalDistance:    this.totalDistance,
+        totalPlayTime:    this.totalPlayTime,
+        highestScore:     this.highestScore,
+        xp:               this.xp,
+        level:             this.level
+      }));
+    } catch (e) {
+      // Storage may be unavailable (private browsing, quota) - fail silently
+    }
+  }
+
+  addCoins(n) {
+    this.coins            += n;
+    this.totalCoinsEarned += n;
+  }
+
+  // Returns true if this XP grant caused one or more level-ups
+  addXP(amount) {
+    this.xp += amount;
+    let leveledUp = false;
+    while (this.xp >= this.xpForLevel(this.level)) {
+      this.xp -= this.xpForLevel(this.level);
+      this.level++;
+      leveledUp = true;
+    }
+    return leveledUp;
+  }
+}
 
 // ─── Obstacle Types ──────────────────────────────────────────────────────────
 const OT = { STATIC:0, MOVING:1, PHANTOM:2, FAST:3, GATE:4, LASER:5 };
@@ -171,6 +253,19 @@ class GameEngine {
     this.riskIntensity = 0;   // 0..1 smooth in/out driver, mirrors dynIntensity pattern
     this.riskScoreMult = 2;   // chosen as 2 or 3 on entry
     
+    // ── Progression System state ─────────────────────────────────────────────
+    this.profile = new PlayerProfile();
+
+    this.coins = [];                                  // in-run collectible neon coins
+    this.nextCoinDistance = 150 + Math.random() * 150;
+
+    this.sessionCoinsEarned = 0;                       // coins collected this run
+    this.sessionXPEarned    = 0;                       // XP earned this run
+    this.survivalXPAccum    = 0;                       // seconds accumulator for survival XP trickle
+
+    this.levelUpTimer   = 0;                           // drives the level-up celebration animation
+    this.levelUpLevel   = this.profile.level;
+
     this.mouseX = 0;
     this.mouseY = 0;
     this.hoverPlay = false;
@@ -292,6 +387,17 @@ class GameEngine {
       ...o, completed: false, flashTimer: 0
     }));
 
+    // Reset progression session state (persistent totals in this.profile are untouched)
+    this.coins = [];
+    this.nextCoinDistance = 150 + Math.random() * 150;
+    this.sessionCoinsEarned = 0;
+    this.sessionXPEarned    = 0;
+    this.survivalXPAccum    = 0;
+    this.levelUpTimer = 0;
+
+    this.profile.gamesPlayed++;
+    this.profile.save();
+
     audio.spawn();
   }
 
@@ -308,6 +414,85 @@ class GameEngine {
         return;
       }
     }
+  }
+
+  // ── Progression System: XP & Levels ───────────────────────────────────────
+  _awardXP(amount, x, y, showText = true) {
+    if (amount <= 0) return;
+    this.sessionXPEarned += amount;
+
+    if (showText) {
+      this.texts.push({
+        id: Math.random(), text: `+${amount} XP`, x, y,
+        color: '#66ddff', life: 0.9
+      });
+    }
+
+    const leveledUp = this.profile.addXP(amount);
+    this.profile.save();
+    if (leveledUp) this._triggerLevelUp();
+  }
+
+  _triggerLevelUp() {
+    this.levelUpTimer = 2.4;
+    this.levelUpLevel = this.profile.level;
+    this._flash('#ffdd33', 0.5);
+    audio.levelUp();
+    for (let i = 0; i < 36; i++) {
+      const angle = (Math.PI * 2 / 36) * i;
+      const spd = 150 + Math.random() * 300;
+      this._spawnParticle(this.playerX, this.playerY, Math.cos(angle) * spd, Math.sin(angle) * spd, 1.1, '#ffd700');
+    }
+  }
+
+  // ── Progression System: Neon Coins ────────────────────────────────────────
+  _maybeSpawnCoin() {
+    // Coins are simple, low-friction pickups - avoid stacking them with obstacle-heavy events
+    if (this.distanceTraveled < this.nextCoinDistance) return;
+    const lane = Math.floor(Math.random() * 3);
+    this.coins.push({
+      id: Math.random(), lane, y: -70,
+      radius: Math.max(13, this.width * 0.020),
+      phase: Math.random() * Math.PI * 2,
+      spin: 0
+    });
+    this.nextCoinDistance = this.distanceTraveled + 240 + Math.random() * 260;
+  }
+
+  _updateCoins(dt, spd) {
+    const pSize = Math.max(20, Math.min(60, this.width * 0.04));
+    for (let i = this.coins.length - 1; i >= 0; i--) {
+      const c = this.coins[i];
+      c.y += spd * dt;
+      c.phase += dt * 5;
+      c.spin  += dt * 4;
+
+      const ox = this._laneX(c.lane);
+      const dx = this.playerX - ox, dy = this.playerY - c.y;
+      if (Math.sqrt(dx * dx + dy * dy) < c.radius + pSize * 0.4) {
+        this._collectCoin(ox, c.y);
+        this.coins.splice(i, 1);
+        continue;
+      }
+      if (c.y > this.height + 100) this.coins.splice(i, 1);
+    }
+  }
+
+  _collectCoin(x, y) {
+    const coinValue = 1;
+    this.profile.addCoins(coinValue);
+    this.sessionCoinsEarned += coinValue;
+    this.profile.save();
+
+    for (let k = 0; k < 14; k++) {
+      const angle = Math.random() * Math.PI * 2;
+      const spd = 90 + Math.random() * 180;
+      this._spawnParticle(x, y, Math.cos(angle) * spd, Math.sin(angle) * spd, 0.6, '#ffd700');
+    }
+    this.texts.push({ id: Math.random(), text: '+1', x, y: y - 20, color: '#ffd700', life: 0.8 });
+    audio.coinCollect();
+
+    this._awardXP(5, x, y - 44);
   }
 
   _spawnWave() {
@@ -486,6 +671,7 @@ class GameEngine {
                const spd = 100 + Math.random() * 100;
                this._spawnParticle(ox + (distX > 0 ? -obs.width/2 : obs.width/2), obs.y, Math.cos(angle)*spd, Math.sin(angle)*spd, 0.5, '#00ff88');
             }
+            this._awardXP(8, this.playerX, this.playerY - 64);
           }
         }
       }
@@ -658,6 +844,8 @@ class GameEngine {
   }
 
   update(dt) {
+    if (this.levelUpTimer > 0) this.levelUpTimer -= dt;
+
     this.hoverPlay = this.state === 'MENU' && this.mouseX > this.width/2 - 80 && this.mouseX < this.width/2 + 80 && this.mouseY > this.height * 0.60 - 25 && this.mouseY < this.height * 0.60 + 25;
     this.hoverRestart = this.state === 'GAMEOVER' && this.mouseX > this.width/2 - 80 && this.mouseX < this.width/2 + 80 && this.mouseY > this.height * 0.3 + 280 - 25 && this.mouseY < this.height * 0.3 + 280 + 25;
 
@@ -684,6 +872,18 @@ class GameEngine {
           localStorage.setItem('neonRunnerHighScore', this.highScore.toString());
           this.newRecord = true;
           audio.highScore();
+        }
+
+        // Persist this run's totals into the player profile
+        this.profile.totalDistance += this.distanceTraveled;
+        this.profile.totalPlayTime += this.gameTime;
+        if (Math.floor(this.score) > this.profile.highestScore) {
+          this.profile.highestScore = Math.floor(this.score);
+        }
+        this.profile.save();
+
+        if (this.newRecord) {
+          this._awardXP(150, this.width/2, this.height/2 - 60);
         }
       }
       return;
@@ -716,6 +916,14 @@ class GameEngine {
     if (Math.floor(this.score / 100) > Math.floor(prevScore / 100)) audio.scoreMilestone();
 
     this.gameTime += dt;
+
+    // Survival XP: a steady trickle for simply staying alive, awarded once per whole second
+    this.survivalXPAccum += dt;
+    if (this.survivalXPAccum >= 1) {
+      const wholeSecs = Math.floor(this.survivalXPAccum);
+      this.survivalXPAccum -= wholeSecs;
+      this._awardXP(2 * wholeSecs, this.playerX, this.playerY - 34, false);
+    }
     
     // Inversion Logic
     if (!this.inverted && this.gameTime > this.nextInvertTime) {
@@ -831,6 +1039,9 @@ class GameEngine {
     this._updatePortals(dt, spd);
     this._maybeSpawnPortal();
 
+    this._updateCoins(dt, spd);
+    this._maybeSpawnCoin();
+
     this.distanceTraveled += spd * dt;
     if (this.distanceTraveled > this.nextSpawnDistance) {
       this._spawnWave();
@@ -849,6 +1060,7 @@ class GameEngine {
           this.score += 200;
           audio.objectiveComplete();
           this.texts.push({id: Math.random(), text: 'OBJECTIVE COMPLETE!', x: this.width/2, y: this.playerY - 80, color: '#ffd700', life: 1.5});
+          this._awardXP(60, this.width/2, this.playerY - 104);
         }
       } else {
         if (obj.flashTimer > 0) obj.flashTimer -= dt;
@@ -912,6 +1124,7 @@ class GameEngine {
     this._drawSpeedLines(ctx);
     this._drawObstacles(ctx);
     this._drawPortals(ctx);
+    this._drawCoins(ctx);
     
     if (this.currentEvent === 'BLIND_RUSH') {
       ctx.fillStyle = 'rgba(0,0,0,0.85)';
@@ -973,6 +1186,7 @@ class GameEngine {
        ctx.strokeRect(15, 15, this.width - 30, this.height - 30);
     }
 
+    this._drawLevelUpEffect(ctx);
     this._drawUI(ctx);
   }
 
@@ -1207,6 +1421,43 @@ class GameEngine {
     }
   }
 
+  // ── Neon Coin visuals ──────────────────────────────────────────────────────
+  _drawCoins(ctx) {
+    for (const c of this.coins) {
+      const ox = this._laneX(c.lane);
+      const bob = Math.sin(c.phase) * 6;
+      const squash = Math.max(0.25, Math.abs(Math.cos(c.spin)));
+
+      ctx.save();
+      ctx.translate(ox, c.y + bob);
+
+      // Outer glow halo
+      const grad = ctx.createRadialGradient(0, 0, 0, 0, 0, c.radius * 2.2);
+      grad.addColorStop(0,   'rgba(255,215,0,0.55)');
+      grad.addColorStop(0.5, 'rgba(255,180,0,0.18)');
+      grad.addColorStop(1,   'rgba(255,180,0,0)');
+      ctx.fillStyle = grad;
+      ctx.beginPath(); ctx.arc(0, 0, c.radius * 2.2, 0, Math.PI * 2); ctx.fill();
+
+      // Coin body (squashed on X to fake a spinning disc)
+      ctx.scale(squash, 1);
+      ctx.shadowBlur = 14; ctx.shadowColor = '#ffd700';
+      ctx.fillStyle = '#ffe066';
+      ctx.strokeStyle = '#ffb700';
+      ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(0, 0, c.radius, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+
+      ctx.fillStyle = '#fff8dc';
+      ctx.font = `bold ${Math.floor(c.radius * 1.1)}px monospace`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('¢', 0, 1);
+      ctx.textBaseline = 'alphabetic';
+
+      ctx.restore();
+    }
+  }
+
   _drawRiskOverlay(ctx) {
     if (this.riskPhase === 'IDLE') return;
     const a = this.riskIntensity;
@@ -1297,6 +1548,54 @@ class GameEngine {
     ctx.restore();
   }
 
+  // ── Level Up celebration ──────────────────────────────────────────────────
+  _drawLevelUpEffect(ctx) {
+    if (this.levelUpTimer <= 0) return;
+    const T = 2.4;
+    const t = 1 - (this.levelUpTimer / T);      // 0 -> 1 over the effect's lifetime
+    const cx = this.width / 2, cy = this.height * 0.38;
+
+    ctx.save();
+
+    // Expanding ring burst
+    const ringCount = 3;
+    for (let i = 0; i < ringCount; i++) {
+      const delay = i * 0.12;
+      const rt = Math.max(0, Math.min(1, (t - delay) / 0.85));
+      if (rt <= 0) continue;
+      const r = rt * (this.width * 0.5);
+      ctx.beginPath();
+      ctx.arc(cx, cy, r, 0, Math.PI * 2);
+      ctx.strokeStyle = `rgba(255,215,0,${(1 - rt) * 0.6})`;
+      ctx.lineWidth = 4;
+      ctx.shadowBlur = 20; ctx.shadowColor = '#ffd700';
+      ctx.stroke();
+    }
+
+    // Pop-in / fade-out text
+    const inT  = Math.min(1, t / 0.18);
+    const outT = Math.max(0, Math.min(1, (t - 0.75) / 0.25));
+    const scale = (0.6 + 0.4 * inT) * (1 + 0.15 * Math.sin(t * Math.PI * 6) * (1 - t));
+    const alpha = inT * (1 - outT);
+
+    ctx.globalAlpha = alpha;
+    ctx.translate(cx, cy);
+    ctx.scale(scale, scale);
+    ctx.textAlign = 'center';
+
+    ctx.font = 'bold 30px monospace';
+    ctx.fillStyle = '#fff';
+    ctx.shadowBlur = 12; ctx.shadowColor = '#ffd700';
+    ctx.fillText('LEVEL UP', 0, -22);
+
+    ctx.font = 'bold 56px monospace';
+    ctx.fillStyle = '#ffd700';
+    ctx.shadowBlur = 24;
+    ctx.fillText(`${this.levelUpLevel}`, 0, 40);
+
+    ctx.restore();
+  }
+
   _drawUI(ctx) {
     for (const t of this.texts) {
       ctx.globalAlpha = Math.max(0, t.life);
@@ -1339,6 +1638,18 @@ class GameEngine {
       ctx.fillStyle = '#fff';
       ctx.fillText(`HIGH SCORE: ${this.highScore}`, this.width/2, this.height * 0.40 + 26);
 
+      // Persistent player profile summary
+      ctx.font = '14px monospace';
+      ctx.fillStyle = '#66ddff';
+      ctx.shadowBlur = 6; ctx.shadowColor = '#66ddff';
+      ctx.fillText(`LEVEL ${this.profile.level}`, this.width/2 - 90, this.height * 0.40 + 52);
+      ctx.fillStyle = '#ffd700';
+      ctx.shadowColor = '#ffd700';
+      ctx.fillText(`¢ ${this.profile.coins}`, this.width/2, this.height * 0.40 + 52);
+      ctx.fillStyle = 'rgba(255,255,255,0.6)';
+      ctx.shadowBlur = 0;
+      ctx.fillText(`${this.profile.gamesPlayed} RUNS`, this.width/2 + 90, this.height * 0.40 + 52);
+
       const btnPulse = this.hoverPlay ? 1.2 + 0.05*Math.sin(Date.now()/150) : 1;
       ctx.save();
       ctx.translate(this.width/2, this.height * 0.60);
@@ -1369,6 +1680,26 @@ class GameEngine {
       }
       ctx.textAlign = 'left'; ctx.font = 'bold 32px monospace';
       ctx.fillText(`SCORE: ${Math.floor(this.score)}`, 20, 40);
+
+      // Coin counter
+      ctx.shadowBlur = 8; ctx.shadowColor = '#ffd700';
+      ctx.fillStyle = '#ffd700';
+      ctx.font = 'bold 18px monospace';
+      ctx.fillText(`¢ ${this.profile.coins}`, 20, 66);
+
+      // Level + XP progress bar
+      const need = this.profile.xpForLevel(this.profile.level);
+      const prog = Math.max(0, Math.min(1, this.profile.xp / need));
+      ctx.shadowBlur = 0;
+      ctx.font = 'bold 14px monospace';
+      ctx.fillStyle = '#66ddff';
+      ctx.fillText(`LV ${this.profile.level}`, 20, 90);
+      ctx.fillStyle = 'rgba(255,255,255,0.15)';
+      ctx.fillRect(70, 80, 110, 8);
+      ctx.fillStyle = '#66ddff';
+      ctx.shadowBlur = 8; ctx.shadowColor = '#66ddff';
+      ctx.fillRect(70, 80, 110 * prog, 8);
+      ctx.shadowBlur = 0;
       
       if (this.combo > 1) {
         ctx.textAlign   = 'center';
@@ -1542,7 +1873,21 @@ class GameEngine {
       ctx.fillText(`${mins}:${secs}`, rx, this.height * 0.25 + 140);
       ctx.fillText(`x${this.maxComboReached}`, rx, this.height * 0.25 + 170);
       ctx.fillText(this.nearMissCount, rx, this.height * 0.25 + 200);
-      
+
+      // Progression recap for this run
+      ctx.textAlign = 'center';
+      ctx.font = 'bold 15px monospace';
+      ctx.fillStyle = '#ffd700';
+      ctx.shadowBlur = 6; ctx.shadowColor = '#ffd700';
+      ctx.fillText(`+${this.sessionCoinsEarned} COINS`, this.width/2 - 80, this.height * 0.25 + 230);
+      ctx.fillStyle = '#66ddff';
+      ctx.shadowColor = '#66ddff';
+      ctx.fillText(`+${this.sessionXPEarned} XP`, this.width/2 + 10, this.height * 0.25 + 230);
+      ctx.shadowBlur = 0;
+      ctx.font = '13px monospace';
+      ctx.fillStyle = 'rgba(255,255,255,0.6)';
+      ctx.fillText(`LEVEL ${this.profile.level}  •  ${this.profile.coins} TOTAL COINS`, this.width/2, this.height * 0.25 + 250);
+
       const rBtnPulse = this.hoverRestart ? 1.2 + 0.05*Math.sin(Date.now()/150) : 1;
       ctx.save();
       ctx.translate(this.width/2, this.height * 0.25 + 300);
