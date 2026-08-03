@@ -82,6 +82,23 @@ class GameEngine {
     this.playerScale = 1.0;
     this.settledInLane = true;
     this.playerTrail = [];
+    this.scalePhase = 'idle';
+    this.scaleTimer = 0;
+    this.frameCount = 0;
+    this.shakeX = 0;
+    this.shakeY = 0;
+    this.cameraX = 0;
+    this.cameraY = 0;
+    this.laneRipples = [];
+    this.rollTimer = 0;
+    this.lastIntScore = 0;
+    this.prevIntScore = 0;
+    this.scoreScaleTimer = 0;
+    this.comboScaleTimer = 0;
+    this.edgeFlashTimer = 0;
+    this.edgeFlashSide = 'left';
+    this.shockwave = { active: false, radius: 0, maxRadius: 0, x: 0, y: 0 };
+    this.playStartTime = 0;
 
     this.score        = 0;
     this.highScore    = 0;
@@ -102,15 +119,17 @@ class GameEngine {
     this.nextInvertTime = 10;
 
     this.gridYOffset = 0;
-    this.shakeTime   = 0;
     this.deathTimer  = 0;
     this.flashTimer  = 0;
+    this.maxFlashTime = 0;
+    this.flashX = 0;
+    this.flashY = 0;
     this.flashColor  = '';
     this.newRecord   = false;
     this.isHighScoring = false;
 
     this.obstacles  = [];
-    this.particles  = Array.from({length: 150}, () => ({life: 0}));
+    this.particles  = Array.from({length: 200}, () => ({life: 0}));
     this.texts      = [];
     this.speedLines = [];
     
@@ -154,10 +173,10 @@ class GameEngine {
   }
 
   _initSpeedLines() {
-    this.speedLines = Array.from({length: 20}, () => ({
+    this.speedLines = Array.from({length: 35}, () => ({
       x: Math.random() * 3000,
       y: Math.random() * 3000,
-      length: 20 + Math.random() * 80,
+      baseLength: 20 + Math.random() * 80,
       speed:  1.5 + Math.random() * 1.0
     }));
   }
@@ -189,6 +208,7 @@ class GameEngine {
     const nl = this.playerLane + dir;
     if (nl >= 0 && nl <= 2) {
       this.playerLane = nl;
+      this.laneRipples.push({x: this._laneX(nl), y: this.playerY, life: 0.15});
       audio.laneSwitch();
     }
   }
@@ -213,6 +233,16 @@ class GameEngine {
     this.playerAngle  = 0;
     this.playerScale  = 1.0;
     this.settledInLane = true;
+    this.shakeX = 0;
+    this.shakeY = 0;
+    this.cameraX = 0;
+    this.cameraY = 0;
+    this.laneRipples = [];
+    this.shockwave.active = false;
+    this.playStartTime = Date.now();
+    this.lastIntScore = 0;
+    this.prevIntScore = 0;
+    this.rollTimer = 0;
     
     this.inverted       = false;
     this.inversionState = 'IDLE';
@@ -238,16 +268,19 @@ class GameEngine {
     audio.spawn();
   }
 
-  _flash(color, duration) {
+  _flash(color, duration, x = this.width/2, y = this.height/2) {
     this.flashColor = color;
     this.flashTimer = duration;
+    this.maxFlashTime = duration;
+    this.flashX = x;
+    this.flashY = y;
   }
 
-  _spawnParticle(x, y, vx, vy, life, color) {
+  _spawnParticle(x, y, vx, vy, life, color, type = 'dot') {
     for(let i=0; i<this.particles.length; i++) {
       if (this.particles[i].life <= 0) {
         const p = this.particles[i];
-        p.x = x; p.y = y; p.vx = vx; p.vy = vy; p.life = life; p.color = color;
+        p.x = x; p.y = y; p.vx = vx; p.vy = vy; p.life = life; p.color = color; p.type = type;
         return;
       }
     }
@@ -332,12 +365,26 @@ class GameEngine {
   _die() {
     this.state      = 'DEATH';
     this.deathTimer = 0.4;
-    this.shakeTime  = 0.5;
-    for (let i = 0; i < 24; i++) {
-      const angle = (Math.PI * 2 / 24) * i;
-      const spd   = 200 + Math.random() * 400;
+    this.shakeX = 14;
+    this.shakeY = 14;
+    this.cameraY += 20;
+
+    for (let i = 0; i < 12; i++) {
+      const angle = (Math.PI * 2 / 12) * i;
+      const spd = 150 + Math.random() * 150;
       this._spawnParticle(this.playerX, this.playerY, Math.cos(angle) * spd, Math.sin(angle) * spd, 1.0, '#00ffff');
     }
+    for (let i = 0; i < 28; i++) {
+      const angle = (Math.PI * 2 / 28) * i;
+      const spd = 350 + Math.random() * 350;
+      this._spawnParticle(this.playerX, this.playerY, Math.cos(angle) * spd, Math.sin(angle) * spd, 1.0, '#00ffff');
+    }
+    for (let i = 0; i < 6; i++) {
+      const angle = Math.random() * Math.PI * 2;
+      const spd = 200 + Math.random() * 200;
+      this._spawnParticle(this.playerX, this.playerY, Math.cos(angle) * spd, Math.sin(angle) * spd, 1.0, '#00ffff', 'shard');
+    }
+    this.shockwave = { active: true, radius: 20, maxRadius: 120, x: this.playerX, y: this.playerY };
     audio.gameOver();
   }
 
@@ -389,8 +436,8 @@ class GameEngine {
           obs.passed = true;
           this.score += 50 * this.combo * (this.currentEvent === 'SCORE_SURGE' ? 3 : this.currentEvent === 'TIME_WARP' ? 2 : 1);
           this.obstaclesDodged++;
-          this.texts.push({id: Math.random(), text: '+50', x: this.playerX, y: this.playerY - 40, color: '#00ff88', life: 1});
-          this._flash('#00ff88', 0.15);
+          this.texts.push({id: Math.random(), text: '+50', x: this.playerX, y: this.playerY - 40, color: '#00ff88', life: 1, maxLife: 1});
+          this._flash('#00ff88', 0.15, this.playerX, this.playerY);
           continue;
         }
 
@@ -407,12 +454,18 @@ class GameEngine {
             obs.nearMissTriggered = true;
             this.nearMissCount++;
             this.score += 50 * this.combo * (this.currentEvent === 'SCORE_SURGE' ? 3 : this.currentEvent === 'TIME_WARP' ? 2 : 1);
-            this.texts.push({id: Math.random(), text: '+NEAR MISS', x: this.playerX, y: this.playerY - 40, color: '#00ff88', life: 1});
+            this.texts.push({id: Math.random(), text: '+NEAR MISS', x: this.playerX, y: this.playerY - 40, color: '#00ff88', life: 1, maxLife: 1, gradient: true});
             audio.nearMiss();
-            for(let k=0; k<8; k++) {
-               const angle = Math.random() * Math.PI * 2;
-               const spd = 100 + Math.random() * 100;
-               this._spawnParticle(ox + (distX > 0 ? -obs.width/2 : obs.width/2), obs.y, Math.cos(angle)*spd, Math.sin(angle)*spd, 0.5, '#00ff88');
+            
+            this.edgeFlashTimer = 0.2;
+            this.edgeFlashSide = (ox > this.playerX) ? 'right' : 'left';
+            this.cameraX += (ox > this.playerX) ? 10 : -10;
+            this.shakeX = 4;
+            
+            for(let k=0; k<10; k++) {
+               const angle = (ox > this.playerX) ? Math.PI + Math.random() - 0.5 : 0 + Math.random() - 0.5;
+               const spd = 200 + Math.random() * 200;
+               this._spawnParticle(ox + (distX > 0 ? -obs.width/2 : obs.width/2), obs.y, Math.cos(angle)*spd, Math.sin(angle)*spd, 0.5, '#00ff88', 'spark');
             }
           }
         }
@@ -435,7 +488,6 @@ class GameEngine {
     if (this.state === 'DEATH') {
       this.speedMult   = 0.3;
       this.deathTimer -= dt;
-      this.shakeTime  -= dt;
       this._updateParticles(dt);
       this._updateTexts(dt);
       this._updateSpeedLines(dt);
@@ -458,6 +510,7 @@ class GameEngine {
     
     const spd = this.speed * this.speedMult;
     const prevScore = this.score;
+    const prevCombo = this.combo;
     
     let scoreMultiplier = 1;
     if (this.currentEvent === 'TIME_WARP') scoreMultiplier = 2;
@@ -466,7 +519,17 @@ class GameEngine {
     this.score += spd * dt * 0.05 * scoreMultiplier;
     this.speed += dt * 5;
     
-    if (this.score > this.highScore && this.score > 100) this.isHighScoring = true;
+    if (this.score > this.highScore && this.score > 100 && !this.isHighScoring) {
+       this.isHighScoring = true;
+       for (let i=0; i<30; i++) {
+          const x = Math.random() * this.width;
+          const y = Math.random() * 100;
+          const vx = (Math.random() - 0.5) * 200;
+          const vy = (Math.random() - 0.5) * 200;
+          this._spawnParticle(x, y, vx, vy, 2.0, '#ffd700');
+       }
+       this.texts.push({id: Math.random(), text: '+NEW RECORD', x: 100, y: 80, color: '#ffd700', life: 2, maxLife: 2});
+    }
 
     if (Math.floor(this.score / 100) > Math.floor(prevScore / 100)) audio.scoreMilestone();
 
@@ -491,7 +554,7 @@ class GameEngine {
         this.inversionState = 'ACTIVE';
         this.inverted = true;
         this.invertTimer = 3 + Math.random() * 2;
-        this._flash('#ff0000', 0.4);
+        this._flash('#ff0000', 0.4, this.width/2, this.height/2);
         audio.inversionStart();
       }
     } else if (this.inversionState === 'ACTIVE') {
@@ -500,9 +563,9 @@ class GameEngine {
         this.inversionState = 'IDLE';
         this.inverted = false;
         this.nextInvertTime = this.gameTime + 8 + Math.random() * 12;
-        this._flash('#ffffff', 0.2);
+        this._flash('#ffffff', 0.2, this.width/2, this.height/2);
         audio.restoreChime();
-        this.texts.push({ id: Math.random(), text: 'Controls Restored', x: this.width/2, y: this.height/2, color: '#00ff88', life: 2.0 });
+        this.texts.push({ id: Math.random(), text: 'Controls Restored', x: this.width/2, y: this.height/2, color: '#00ff88', life: 2.0, maxLife: 2.0 });
       }
     }
 
@@ -511,8 +574,9 @@ class GameEngine {
       if (this.combo < 5) {
         this.combo++;
         if (this.combo > this.maxComboReached) this.maxComboReached = this.combo;
-        if (this.combo === 3 || this.combo === 5) {
-           this.ripple = { active: true, radius: 0, maxRadius: 1000, x: this.playerX, y: this.playerY };
+        if (this.combo === 3 || this.combo === 5 || this.combo === 2) {
+           const colors = {2: '#00ff88', 3: '#ffaa00', 5: '#ff00ff'};
+           this.ripple = { active: true, radius: 0, maxRadius: 1000, x: this.playerX, y: this.playerY, color: colors[this.combo] || '#ff00ff' };
            audio.comboRipple();
         }
         audio.comboUp();
@@ -537,29 +601,95 @@ class GameEngine {
     this.gridYOffset += spd * dt;
     this._updateSpeedLines(dt);
 
-    // Spring physics movement
+    // Acceleration physics movement
     this.targetX  = this._laneX(this.playerLane);
-    const springK = 200;
-    const damp = 12;
-    const force = (this.targetX - this.playerX) * springK;
-    this.playerVX = this.playerVX + (force - this.playerVX * damp) * dt;
-    this.playerX += this.playerVX * dt;
-    this.playerAngle = Math.max(-0.26, Math.min(0.26, this.playerVX / 5000));
+    const accel = 1800;
+    const drag = 8;
+    const dirX = Math.sign(this.targetX - this.playerX);
     
-    if (Math.abs(this.targetX - this.playerX) < 5 && Math.abs(this.playerVX) < 50 && !this.settledInLane) {
-      this.settledInLane = true;
-      this.playerScale = 1.2;
-    } else if (Math.abs(this.targetX - this.playerX) > 20) {
+    if (Math.abs(this.targetX - this.playerX) > 1) {
+      this.playerVX += dirX * accel * dt;
+    }
+    this.playerVX -= this.playerVX * drag * dt;
+    this.playerX += this.playerVX * dt;
+    
+    if (Math.abs(this.targetX - this.playerX) < 3 && Math.abs(this.playerVX) > 10) {
+      this.playerX = this.targetX;
+      this.playerVX = -this.playerVX * 0.25;
+      if (!this.settledInLane) {
+        this.settledInLane = true;
+        this.scalePhase = 'up';
+        this.scaleTimer = 0.08;
+      }
+    } else if (Math.abs(this.targetX - this.playerX) > 10) {
       this.settledInLane = false;
     }
-    if (this.playerScale > 1.0) {
-      this.playerScale -= dt * 2;
-      if (this.playerScale < 1.0) this.playerScale = 1.0;
+    
+    if (this.scalePhase === 'up') {
+      this.scaleTimer -= dt;
+      this.playerScale = 1.0 + 0.15 * (1 - Math.max(0, this.scaleTimer) / 0.08);
+      if (this.scaleTimer <= 0) {
+        this.scalePhase = 'down';
+        this.scaleTimer = 0.12;
+      }
+    } else if (this.scalePhase === 'down') {
+      this.scaleTimer -= dt;
+      this.playerScale = 1.15 - 0.15 * (1 - Math.max(0, this.scaleTimer) / 0.12);
+      if (this.scaleTimer <= 0) {
+        this.scalePhase = 'idle';
+        this.playerScale = 1.0;
+      }
+    } else {
+      this.playerScale = 1.0;
     }
 
-    this.playerTrail.push({x: this.playerX, y: this.playerY, angle: this.playerAngle, life: 0.2});
-    if (this.playerTrail.length > 5) this.playerTrail.shift();
-    for (const pt of this.playerTrail) pt.life -= dt;
+    this.playerAngle = Math.max(-0.314, Math.min(0.314, this.playerVX / 1500));
+    
+    this.frameCount++;
+    if (this.frameCount % 2 === 0) {
+      this.playerTrail.push({x: this.playerX, y: this.playerY, angle: this.playerAngle, life: 0.3});
+      if (this.playerTrail.length > 8) this.playerTrail.shift();
+    }
+    for (let i = this.playerTrail.length - 1; i >= 0; i--) {
+      this.playerTrail[i].life -= dt;
+      if (this.playerTrail[i].life <= 0) this.playerTrail.splice(i, 1);
+    }
+    
+    // camera follow
+    const camTargetX = (this.playerX - this.width/2) * 0.04;
+    this.cameraX += (camTargetX - this.cameraX) * 3 * dt;
+    this.cameraY -= this.cameraY * 5 * dt;
+
+    if (this.shakeX > 0.1) this.shakeX -= this.shakeX * 8 * dt; else this.shakeX = 0;
+    if (this.shakeY > 0.1) this.shakeY -= this.shakeY * 8 * dt; else this.shakeY = 0;
+    if (this.edgeFlashTimer > 0) this.edgeFlashTimer -= dt;
+
+    if (this.score - prevScore >= 50) this.scoreScaleTimer = 0.15;
+    if (this.scoreScaleTimer > 0) this.scoreScaleTimer -= dt;
+
+    if (this.combo > prevCombo) {
+      this.comboScaleTimer = 0.3;
+      this.texts.push({id: Math.random(), text: '+COMBO', x: this.width/2, y: this.height/2, color: '#ffaa00', life: 1, maxLife: 1});
+    }
+    if (this.comboScaleTimer > 0) this.comboScaleTimer -= dt;
+    
+    const currentInt = Math.floor(this.score);
+    if (currentInt > this.lastIntScore) {
+       this.rollTimer = 0.15;
+       this.prevIntScore = this.lastIntScore;
+       this.lastIntScore = currentInt;
+    }
+    if (this.rollTimer > 0) this.rollTimer -= dt;
+    
+    if (this.shockwave && this.shockwave.active) {
+       this.shockwave.radius += 250 * dt;
+       if (this.shockwave.radius > this.shockwave.maxRadius) this.shockwave.active = false;
+    }
+    
+    for (let i = this.laneRipples.length - 1; i >= 0; i--) {
+      this.laneRipples[i].life -= dt;
+      if (this.laneRipples[i].life <= 0) this.laneRipples.splice(i, 1);
+    }
 
     for (let i = this.obstacles.length - 1; i >= 0; i--) {
       const obs = this.obstacles[i];
@@ -576,7 +706,7 @@ class GameEngine {
         if (obs.type !== OT.LASER && obs.type !== OT.GATE) this.obstaclesDodged++;
         if (obs.isGauntletLast) {
            this.score += 500;
-           this.texts.push({id: Math.random(), text: '+500 GAUNTLET SURVIVED!', x: this.width/2, y: this.playerY - 60, color: '#ffd700', life: 2});
+           this.texts.push({id: Math.random(), text: '+500 GAUNTLET SURVIVED!', x: this.width/2, y: this.playerY - 60, color: '#ffd700', life: 2, maxLife: 2});
            this.currentEvent = null;
         }
       }
@@ -598,7 +728,7 @@ class GameEngine {
           obj.flashTimer = 1.0;
           this.score += 200;
           audio.objectiveComplete();
-          this.texts.push({id: Math.random(), text: 'OBJECTIVE COMPLETE!', x: this.width/2, y: this.playerY - 80, color: '#ffd700', life: 1.5});
+          this.texts.push({id: Math.random(), text: 'OBJECTIVE COMPLETE!', x: this.width/2, y: this.playerY - 80, color: '#ffd700', life: 1.5, maxLife: 1.5});
         }
       } else {
         if (obj.flashTimer > 0) obj.flashTimer -= dt;
@@ -614,6 +744,7 @@ class GameEngine {
     for (let i = 0; i < this.particles.length; i++) {
       const p = this.particles[i];
       if (p.life > 0) {
+        p.vy += 80 * dt;
         p.x += p.vx * dt; p.y += p.vy * dt; p.life -= dt * 2;
       }
     }
@@ -622,14 +753,17 @@ class GameEngine {
   _updateTexts(dt) {
     for (let i = this.texts.length - 1; i >= 0; i--) {
       const t = this.texts[i];
-      t.y -= 50 * dt; t.life -= dt;
+      t.life -= dt;
       if (t.life <= 0) this.texts.splice(i, 1);
     }
   }
 
   _updateSpeedLines(dt) {
     const spd = (this.state === 'MENU' ? 200 : this.speed) * this.speedMult;
-    for (const sl of this.speedLines) sl.y += spd * sl.speed * dt;
+    for (const sl of this.speedLines) {
+       sl.length = sl.baseLength * (this.speed / 400);
+       sl.y += spd * sl.speed * dt;
+    }
   }
 
   // ── Draw ──────────────────────────────────────────────────────────────────
@@ -640,10 +774,30 @@ class GameEngine {
     this._drawBackground(ctx);
 
     ctx.save();
-    if (this.shakeTime > 0) {
-      const amt = (this.shakeTime / 0.5) * 8;
-      ctx.translate((Math.random() - 0.5) * amt, (Math.random() - 0.5) * amt);
+    const now = Date.now();
+    if (this.state === 'PLAYING' && this.playStartTime) {
+      const elapsed = now - this.playStartTime;
+      if (elapsed < 300) {
+        const scale = 1.05 - 0.05 * (elapsed / 300);
+        ctx.translate(this.width/2, this.height/2);
+        ctx.scale(scale, scale);
+        ctx.translate(-this.width/2, -this.height/2);
+      }
+    } else if (this.state === 'GAMEOVER') {
+      const elapsed = now - this.gameOverStartTime;
+      const scale = 1.0 + 0.05 * Math.min(1, elapsed / 500);
+      ctx.translate(this.width/2, this.height/2);
+      ctx.scale(scale, scale);
+      ctx.translate(-this.width/2, -this.height/2);
     }
+
+    let cx = this.cameraX;
+    let cy = this.cameraY;
+    if (this.shakeX > 0 || this.shakeY > 0) {
+      cx += Math.sin(now / 1000 * 30 * Math.PI * 2) * this.shakeX;
+      cy += Math.cos(now / 1000 * 20 * Math.PI * 2) * this.shakeY;
+    }
+    ctx.translate(cx, cy);
 
     this._drawGrid(ctx);
     this._drawSpeedLines(ctx);
@@ -666,19 +820,45 @@ class GameEngine {
       ctx.fillRect(0, 0, this.width, this.height);
     }
     if (this.flashTimer > 0) {
-      ctx.globalAlpha = this.flashTimer / 0.3;
-      ctx.fillStyle   = this.flashColor;
+      const ease = (this.flashTimer * this.flashTimer) / (this.maxFlashTime * this.maxFlashTime);
+      ctx.globalAlpha = Math.max(0, ease);
+      const grad = ctx.createRadialGradient(this.flashX, this.flashY, 0, this.flashX, this.flashY, Math.max(this.width, this.height));
+      grad.addColorStop(0, this.flashColor);
+      grad.addColorStop(1, 'transparent');
+      ctx.fillStyle = grad;
       ctx.fillRect(0, 0, this.width, this.height);
       ctx.globalAlpha = 1;
     }
+
+    for (const lr of this.laneRipples) {
+       const p = 1 - (lr.life / 0.15);
+       const w = p * (this.width / 3);
+       ctx.globalAlpha = 1 - p;
+       ctx.strokeStyle = '#00ffff';
+       ctx.lineWidth = 2;
+       ctx.beginPath(); ctx.moveTo(lr.x - w/2, lr.y); ctx.lineTo(lr.x + w/2, lr.y); ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
     
     if (this.ripple && this.ripple.active) {
        ctx.beginPath();
        ctx.arc(this.ripple.x, this.ripple.y, this.ripple.radius, 0, Math.PI*2);
        const alpha = Math.max(0, 1 - (this.ripple.radius / this.ripple.maxRadius));
-       ctx.strokeStyle = `rgba(0, 255, 255, ${alpha})`;
+       ctx.globalAlpha = alpha;
+       ctx.strokeStyle = this.ripple.color || '#00ffff';
        ctx.lineWidth = 5;
        ctx.stroke();
+       ctx.globalAlpha = 1;
+    }
+    if (this.shockwave && this.shockwave.active) {
+       ctx.beginPath();
+       ctx.arc(this.shockwave.x, this.shockwave.y, this.shockwave.radius, 0, Math.PI*2);
+       const alpha = Math.max(0, 1 - (this.shockwave.radius - 20) / 100);
+       ctx.globalAlpha = alpha;
+       ctx.strokeStyle = '#00ffff';
+       ctx.lineWidth = 2;
+       ctx.stroke();
+       ctx.globalAlpha = 1;
     }
     
     ctx.restore();
@@ -696,12 +876,47 @@ class GameEngine {
     }
     
     if (this.isHighScoring && this.state === 'PLAYING') {
-       const grad = ctx.createLinearGradient(0,0,this.width,this.height);
-       grad.addColorStop(0, 'rgba(255, 215, 0, 0.5)');
-       grad.addColorStop(1, 'rgba(255, 215, 0, 0.1)');
-       ctx.lineWidth = 30;
-       ctx.strokeStyle = grad;
-       ctx.strokeRect(15, 15, this.width - 30, this.height - 30);
+       const alpha = 0.3 + 0.2 * Math.sin(Date.now() / 150);
+       ctx.lineWidth = 10;
+       ctx.strokeStyle = `rgba(255, 215, 0, ${alpha})`;
+       ctx.strokeRect(5, 5, this.width - 10, this.height - 10);
+    }
+    if (this.edgeFlashTimer > 0) {
+      const alpha = this.edgeFlashTimer / 0.2;
+      const grad = ctx.createLinearGradient(0, 0, this.width, 0);
+      if (this.edgeFlashSide === 'left') {
+        grad.addColorStop(0, `rgba(0, 255, 136, ${alpha * 0.4})`);
+        grad.addColorStop(0.2, 'transparent');
+      } else {
+        grad.addColorStop(0.8, 'transparent');
+        grad.addColorStop(1, `rgba(0, 255, 136, ${alpha * 0.4})`);
+      }
+      ctx.fillStyle = grad;
+      ctx.fillRect(0, 0, this.width, this.height);
+    }
+    const speedAlpha = Math.max(0, Math.min(1, (this.speed - 600) / 400));
+    if (speedAlpha > 0) {
+      const vigGrad = ctx.createRadialGradient(this.width/2, this.height/2, this.width*0.2, this.width/2, this.height/2, this.width*0.8);
+      vigGrad.addColorStop(0, 'rgba(0,0,0,0)');
+      vigGrad.addColorStop(1, `rgba(0,0,0,${0.4 + speedAlpha * 0.4})`);
+      ctx.fillStyle = vigGrad;
+      ctx.fillRect(0, 0, this.width, this.height);
+    }
+    if (this.speed > 800 && this.state === 'PLAYING') {
+      ctx.globalAlpha = 0.3;
+      ctx.drawImage(canvas, 1, 1);
+      ctx.drawImage(canvas, -1, 1);
+      ctx.drawImage(canvas, 0, -1);
+      ctx.globalAlpha = 1;
+    }
+    if (this.state === 'PLAYING' && this.playStartTime) {
+      const elapsed = Date.now() - this.playStartTime;
+      if (elapsed < 200) {
+         ctx.fillStyle = 'black';
+         ctx.globalAlpha = 1 - (elapsed / 200);
+         ctx.fillRect(0, 0, this.width, this.height);
+         ctx.globalAlpha = 1;
+      }
     }
 
     this._drawUI(ctx);
@@ -777,11 +992,13 @@ class GameEngine {
     for (let i = 0; i < this.playerTrail.length; i++) {
        const pt = this.playerTrail[i];
        if (pt.life <= 0) continue;
+       const progress = Math.max(0, pt.life / 0.3);
+       const trailScale = 0.3 + 0.6 * progress;
        ctx.save();
        ctx.translate(pt.x, pt.y);
-       ctx.scale(this.playerScale, this.playerScale);
+       ctx.scale(this.playerScale * trailScale, this.playerScale * trailScale);
        ctx.rotate(Math.PI/4 + pt.angle);
-       ctx.globalAlpha = Math.max(0, pt.life / 0.2) * 0.3;
+       ctx.globalAlpha = 0.6 * progress;
        ctx.fillStyle = '#00ffff';
        ctx.beginPath(); ctx.rect(-size/2, -size/2, size, size); ctx.fill();
        ctx.restore();
@@ -791,7 +1008,7 @@ class GameEngine {
     ctx.translate(this.playerX, this.playerY);
     ctx.scale(this.playerScale, this.playerScale);
     ctx.rotate(Math.PI / 4 + this.playerAngle);
-    ctx.shadowBlur   = 20;
+    ctx.shadowBlur   = 15;
     ctx.shadowColor  = '#00ffff';
     ctx.strokeStyle  = '#00ffff';
     ctx.fillStyle    = 'rgba(0,255,255,0.2)';
@@ -799,6 +1016,22 @@ class GameEngine {
     ctx.beginPath();
     ctx.rect(-size/2, -size/2, size, size);
     ctx.fill(); ctx.stroke();
+    
+    ctx.shadowBlur = 40;
+    ctx.globalAlpha = 0.3;
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+
+    if (this.combo >= 3) {
+      const pulse = Math.abs(Math.sin(Date.now() / 1000 * 4));
+      ctx.shadowColor = '#ffaa00';
+      ctx.shadowBlur = 25 * pulse;
+      ctx.globalAlpha = 0.5 * pulse;
+      ctx.strokeStyle = '#ffaa00';
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
+    ctx.shadowBlur = 0;
     ctx.restore();
   }
 
@@ -902,25 +1135,63 @@ class GameEngine {
       if (p.life <= 0) continue;
       ctx.globalAlpha = Math.max(0, p.life);
       ctx.fillStyle   = p.color;
-      ctx.shadowBlur  = 10; ctx.shadowColor = p.color;
-      ctx.beginPath(); ctx.arc(p.x, p.y, 3, 0, Math.PI * 2); ctx.fill();
+      if (p.life > 0.5) {
+        ctx.shadowBlur  = 8; ctx.shadowColor = p.color;
+      } else {
+        ctx.shadowBlur = 0;
+      }
+      if (p.type === 'shard') {
+        ctx.save();
+        ctx.translate(p.x, p.y);
+        ctx.rotate(p.life * 10);
+        ctx.fillRect(-2, -6, 4, 12);
+        ctx.restore();
+      } else if (p.type === 'spark') {
+        ctx.beginPath();
+        ctx.moveTo(p.x, p.y);
+        ctx.lineTo(p.x - p.vx * 0.05, p.y - p.vy * 0.05);
+        ctx.strokeStyle = p.color;
+        ctx.lineWidth = 2;
+        ctx.stroke();
+      } else {
+        ctx.beginPath(); ctx.arc(p.x, p.y, 3, 0, Math.PI * 2); ctx.fill();
+      }
     }
     ctx.globalAlpha = 1; ctx.shadowBlur = 0;
   }
 
   _drawUI(ctx) {
     for (const t of this.texts) {
-      ctx.globalAlpha = Math.max(0, t.life);
-      ctx.fillStyle   = t.color;
-      ctx.font        = 'bold 24px monospace';
-      ctx.textAlign   = 'center';
-      ctx.fillText(t.text, t.x, t.y);
+      const p = Math.max(0, t.life / (t.maxLife || 1));
+      const easeOut = 1 - (1 - p) * (1 - p);
+      const yOffset = -50 * (1 - easeOut);
+      
+      ctx.save();
+      ctx.translate(t.x, t.y + yOffset);
+      const scale = 1.0 + 0.2 * p;
+      ctx.scale(scale, scale);
+      
+      ctx.globalAlpha = p;
+      if (t.gradient) {
+         const grad = ctx.createLinearGradient(-50, 0, 50, 0);
+         grad.addColorStop(0, '#00ff88');
+         grad.addColorStop(1, '#00ffff');
+         ctx.fillStyle = grad;
+      } else {
+         ctx.fillStyle = t.color;
+      }
+      ctx.font = 'bold 24px "Courier New", monospace';
+      ctx.textAlign = 'center';
+      ctx.shadowBlur = 10; ctx.shadowColor = t.color;
+      ctx.fillText(t.text, 0, 0);
+      ctx.restore();
     }
+    ctx.shadowBlur = 0;
     ctx.globalAlpha = 1;
 
     if (this.state === 'MENU') {
       ctx.textAlign = 'center';
-      ctx.font = 'bold 64px monospace';
+      ctx.font = 'bold 64px "Courier New", monospace';
       const text = 'NEON RUNNER';
       let tx = this.width/2 - (ctx.measureText(text).width / 2);
       for (let i=0; i<text.length; i++) {
@@ -936,7 +1207,7 @@ class GameEngine {
       }
       
       ctx.shadowBlur = 0;
-      ctx.font = '16px monospace';
+      ctx.font = '16px "Courier New", monospace';
       ctx.fillStyle = 'rgba(255,255,255,0.5)';
       ctx.fillText('HOW FAR CAN YOU GO?', this.width/2, this.height * 0.35);
 
@@ -946,52 +1217,85 @@ class GameEngine {
       ctx.shadowBlur = 10; ctx.shadowColor = '#00ffff';
       ctx.strokeRect(this.width/2 - 120, this.height * 0.40, 240, 40);
       ctx.shadowBlur = 0;
-      ctx.font = '20px monospace';
+      ctx.font = '20px "Courier New", monospace';
       ctx.fillStyle = '#fff';
       ctx.fillText(`HIGH SCORE: ${this.highScore}`, this.width/2, this.height * 0.40 + 26);
 
-      const btnPulse = this.hoverPlay ? 1.2 + 0.05*Math.sin(Date.now()/150) : 1;
+      const btnScale = this.hoverPlay ? 1.04 : 1.0;
       ctx.save();
       ctx.translate(this.width/2, this.height * 0.60);
-      ctx.scale(btnPulse, btnPulse);
+      ctx.scale(btnScale, btnScale);
       ctx.strokeStyle = '#00ffff';
-      ctx.fillStyle = this.hoverPlay ? 'rgba(0,255,255,0.2)' : 'rgba(0,0,0,0.5)';
-      ctx.shadowBlur = 15; ctx.shadowColor = '#00ffff';
+      ctx.fillStyle = this.hoverPlay ? 'rgba(0,255,255,0.15)' : 'rgba(0,0,0,0.5)';
+      ctx.shadowBlur = this.hoverPlay ? 50 : 30; ctx.shadowColor = '#00ffff';
       ctx.beginPath();
       if (ctx.roundRect) ctx.roundRect(-80, -25, 160, 50, 10);
       else ctx.rect(-80, -25, 160, 50);
       ctx.fill(); ctx.stroke();
+      if (this.hoverPlay) {
+         ctx.save(); ctx.clip();
+         const scanY = -25 + ((Date.now() % 1500) / 1500) * 50;
+         ctx.fillStyle = 'rgba(255,255,255,0.8)';
+         ctx.fillRect(-80, scanY, 160, 2);
+         ctx.restore();
+      }
       ctx.fillStyle = '#fff'; ctx.shadowBlur = 0;
-      ctx.font = '24px monospace'; ctx.textAlign = 'center';
+      ctx.font = '24px "Courier New", monospace'; ctx.textAlign = 'center';
       ctx.fillText('PLAY', 0, 8);
       ctx.restore();
       
       ctx.fillStyle = '#fff';
-      ctx.font = '16px monospace';
+      ctx.font = '16px "Courier New", monospace';
       ctx.globalAlpha = 0.5;
       ctx.fillText('Or tap anywhere', this.width/2, this.height * 0.60 + 50);
       ctx.globalAlpha = 1;
 
     } else if (this.state === 'PLAYING' || this.state === 'DEATH') {
+      ctx.save();
+      ctx.translate(20, 40);
+      if (this.scoreScaleTimer > 0) {
+         const scale = 1.0 + 0.3 * (this.scoreScaleTimer / 0.15);
+         ctx.scale(scale, scale);
+      }
       if (this.currentEvent === 'SCORE_SURGE') {
          ctx.shadowBlur = 15; ctx.shadowColor = '#ffd700'; ctx.fillStyle = '#ffd700';
       } else {
          ctx.shadowBlur = 10; ctx.shadowColor = '#fff'; ctx.fillStyle = '#fff';
       }
-      ctx.textAlign = 'left'; ctx.font = 'bold 32px monospace';
-      ctx.fillText(`SCORE: ${Math.floor(this.score)}`, 20, 40);
+      ctx.textAlign = 'left'; ctx.font = 'bold 32px "Courier New", monospace';
+      if (this.rollTimer > 0) {
+         const p = 1 - (this.rollTimer / 0.15);
+         ctx.globalAlpha = p;
+         ctx.fillText(`SCORE: ${this.lastIntScore}`, 0, -20 * (1 - p));
+         ctx.globalAlpha = 1 - p;
+         ctx.fillText(`SCORE: ${this.prevIntScore}`, 0, 20 * p);
+      } else {
+         ctx.fillText(`SCORE: ${this.lastIntScore || 0}`, 0, 0);
+      }
+      ctx.globalAlpha = 1;
+      ctx.restore();
       
       if (this.combo > 1) {
+        const colors = {2: '#00ff88', 3: '#ffaa00', 4: '#ffaa00', 5: '#ff00ff'};
+        const cColor = colors[this.combo] || '#ff00ff';
+        ctx.save();
+        ctx.translate(this.width/2, 40);
+        if (this.comboScaleTimer > 0) {
+           const sc = 1.0 + 0.4 * (this.comboScaleTimer / 0.3);
+           ctx.scale(sc, sc);
+        }
         ctx.textAlign   = 'center';
-        ctx.fillStyle   = '#00ff88'; ctx.shadowColor = '#00ff88';
-        ctx.fillText(`COMBO x${this.combo}`, this.width/2, 40);
+        ctx.fillStyle   = cColor; ctx.shadowColor = cColor;
+        ctx.font = 'bold 32px "Courier New", monospace';
+        ctx.fillText(`COMBO x${this.combo}`, 0, 0);
+        ctx.restore();
       }
       
       if (this.inversionState === 'WARNING') {
         ctx.textAlign = 'center';
         ctx.fillStyle = (Math.floor(Date.now() / 150) % 2 === 0) ? '#ff0000' : '#ffffff';
         ctx.shadowColor = ctx.fillStyle;
-        ctx.font = 'bold 40px monospace';
+        ctx.font = 'bold 40px "Courier New", monospace';
         const sec = Math.ceil(this.inversionWarningTimer);
         ctx.fillText(`!! INVERTING IN ${sec}...`, this.width/2, this.height/2);
       } else if (this.inversionState === 'ACTIVE') {
@@ -999,14 +1303,14 @@ class GameEngine {
         const p = 0.5 + 0.5 * Math.sin(Date.now() / 100);
         ctx.fillStyle = `rgba(255, 0, 85, ${p})`;
         ctx.shadowColor = '#ff0055';
-        ctx.font = 'bold 30px monospace';
+        ctx.font = 'bold 30px "Courier New", monospace';
         ctx.fillText('!! CONTROLS INVERTED !!', this.width/2, this.height/2);
       }
       
       if (this.eventBannerTimer > 0) {
          ctx.save();
          ctx.textAlign = 'center';
-         ctx.font = 'bold 48px monospace';
+         ctx.font = 'bold 48px "Courier New", monospace';
          ctx.globalAlpha = Math.min(1, this.eventBannerTimer / 0.5);
          ctx.fillStyle = '#ff00ff';
          ctx.shadowBlur = 20; ctx.shadowColor = '#ff00ff';
@@ -1024,7 +1328,7 @@ class GameEngine {
         ctx.fillRect(0, 0, 120, 80);
         ctx.strokeRect(0, 0, 120, 80);
         
-        ctx.font = '10px monospace';
+        ctx.font = '10px "Courier New", monospace';
         ctx.textAlign = 'left';
         let y = 15;
         for (const obj of this.activeObjectives) {
@@ -1080,13 +1384,13 @@ class GameEngine {
       ctx.strokeRect(this.width/2 - 170, this.height * 0.25, 340, 240);
       
       ctx.textAlign = 'center';
-      ctx.font = 'bold 36px monospace';
+      ctx.font = 'bold 36px "Courier New", monospace';
       ctx.fillStyle = '#ff0055';
       ctx.shadowBlur = 10; ctx.shadowColor = '#ff0055';
       ctx.fillText('GAME OVER', this.width/2, this.height * 0.25 + 40);
       ctx.shadowBlur = 0;
 
-      ctx.font = '16px monospace';
+      ctx.font = '16px "Courier New", monospace';
       ctx.fillStyle = '#aaa';
       ctx.textAlign = 'right';
       const lx = this.width/2 - 10;
@@ -1107,24 +1411,31 @@ class GameEngine {
       ctx.fillText(`x${this.maxComboReached}`, rx, this.height * 0.25 + 170);
       ctx.fillText(this.nearMissCount, rx, this.height * 0.25 + 200);
       
-      const rBtnPulse = this.hoverRestart ? 1.2 + 0.05*Math.sin(Date.now()/150) : 1;
+      const rBtnScale = this.hoverRestart ? 1.04 : 1.0;
       ctx.save();
       ctx.translate(this.width/2, this.height * 0.25 + 300);
-      ctx.scale(rBtnPulse, rBtnPulse);
+      ctx.scale(rBtnScale, rBtnScale);
       ctx.strokeStyle = '#00ffff';
-      ctx.fillStyle = this.hoverRestart ? 'rgba(0,255,255,0.2)' : 'rgba(0,0,0,0.5)';
-      ctx.shadowBlur = 15; ctx.shadowColor = '#00ffff';
+      ctx.fillStyle = this.hoverRestart ? 'rgba(0,255,255,0.15)' : 'rgba(0,0,0,0.5)';
+      ctx.shadowBlur = this.hoverRestart ? 50 : 30; ctx.shadowColor = '#00ffff';
       ctx.beginPath();
       if(ctx.roundRect) ctx.roundRect(-80, -25, 160, 50, 10);
       else ctx.rect(-80, -25, 160, 50);
       ctx.fill(); ctx.stroke();
+      if (this.hoverRestart) {
+         ctx.save(); ctx.clip();
+         const scanY = -25 + ((Date.now() % 1500) / 1500) * 50;
+         ctx.fillStyle = 'rgba(255,255,255,0.8)';
+         ctx.fillRect(-80, scanY, 160, 2);
+         ctx.restore();
+      }
       ctx.fillStyle = '#fff'; ctx.shadowBlur = 0;
-      ctx.font = '24px monospace'; ctx.textAlign = 'center';
+      ctx.font = '24px "Courier New", monospace'; ctx.textAlign = 'center';
       ctx.fillText('RESTART', 0, 8);
       ctx.restore();
       
       ctx.fillStyle = '#fff';
-      ctx.font = '16px monospace';
+      ctx.font = '16px "Courier New", monospace';
       ctx.globalAlpha = 0.5;
       ctx.fillText('Or tap anywhere', this.width/2, this.height * 0.25 + 350);
       ctx.globalAlpha = 1;
